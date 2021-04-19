@@ -360,7 +360,7 @@ int main(int argc, char **argv)
 
 	/* Create NULL section header as is required by the Spec. So dumb and waste of bytes*/
 	write_section(":ELF_section_headers", "%0", "%0", "%0", "%0", "%0", "%0", "%0", "0", "%0");
-	write_section(":ELF_section_header_text", "%ELF_shstr__text>ELF_shstr", "%1", "%6", "&ELF_text", "%ELF_text>ELF_base", "%ELF_data>ELF_text", "%0", "0", "%0");
+	write_section(":ELF_section_header_text", "%ELF_shstr__text>ELF_shstr", "%1", "%6", "&ELF_text", "%ELF_text>ELF_base", "%ELF_sym>ELF_text", "%0", "0", "%0");
 	write_section(":ELF_section_header_shstr", "%ELF_shstr__shstr>ELF_shstr", "%3", "%0", "&ELF_shstr", "%ELF_shstr>ELF_base", "%ELF_section_headers>ELF_shstr", "%0", "0", "%0");
 	write_section(":ELF_section_header_str", "%ELF_shstr__str>ELF_shstr", "%3", "%0", "&ELF_str", "%ELF_str>ELF_base", "%ELF_sym>ELF_str", "%0", "0", "%0");
 	if(64 == BITSIZE) write_section(":ELF_section_header_sym", "%ELF_shstr__sym>ELF_shstr", "%2", "%0", "&ELF_sym", "%ELF_sym>ELF_base", "%ELF_end>ELF_sym", "%3", int2str(count, 10, TRUE), "%24");
