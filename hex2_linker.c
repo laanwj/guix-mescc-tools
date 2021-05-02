@@ -69,6 +69,7 @@ char* scratch;
 char* filename;
 int linenumber;
 int ALIGNED;
+unsigned int sr; /* shift register */
 
 void line_error()
 {
@@ -146,6 +147,13 @@ int GetHash(char* s)
 unsigned GetTarget(char* c)
 {
 	struct entry* i;
+	/* try to parse target as a number first. */
+	unsigned value = strtoint(c);
+	if(('0' == c[0]) || (0 != value))
+	{
+		return value;
+	}
+	/* when that fails look up label. */
 	for(i = jump_tables[GetHash(c)]; NULL != i; i = i->next)
 	{
 		if(match(c, i->name))
@@ -318,6 +326,7 @@ void Update_Pointer(char ch)
 	else if(in_set(ch, "@$")) ip = ip + 2; /* Deal with @ and $ */
 	else if('~' == ch) ip = ip + 3; /* Deal with ~ */
 	else if('!' == ch) ip = ip + 1; /* Deal with ! */
+	else if(in_set(ch, ".=")) ; /* Deal with . and ' */
 	else
 	{
 		line_error();
@@ -326,8 +335,85 @@ void Update_Pointer(char ch)
 	}
 }
 
+void outOfRange(char ch, int value)
+{
+	line_error();
+	fputs("error: value ", stderr);
+	fputs(int2str(value, 10, TRUE), stderr);
+	fputs(" out of range for field type ", stderr);
+	fputc(ch, stderr);
+	fputs("\n", stderr);
+	exit(EXIT_FAILURE);
+}
+
+/* RISC-V immediate value encoding. */
+unsigned int encodeField(char ch, int value)
+{
+	/* a less platform specific description of fields would be:
+	 - bit mapping     [field bit -> opcode bit] (up to 32)
+	 - signed          true/false (determines minimum value, maximum value, based on top field bit)
+	 - do range check
+	 - must be aligned (B, J) (with lowest field bit)
+	 - is rounded (U) (with lowest field bit)
+
+	   in a structure per letter
+	 */
+	if ('I' == ch)
+	{
+		/* no range check because it needs to work with labels for lui/addi
+		   if (value < -0x800 || value > 0x7ff)
+			outOfRange(ch, value);
+		*/
+		return (value & 0xfff) << 20;
+	}
+	else if ('S' == ch)
+	{
+		if (value < -0x800 || value > 0x7ff)
+			outOfRange(ch, value);
+		return ((value & 0x1f) << 7) | ((value & 0xfe0) << (31 - 11));
+	}
+	else if ('B' == ch)
+	{
+		if ((value < -0x1000 || value > 0xfff) || (value & 1))
+			outOfRange(ch, value);
+		return ((value & 0x1e) << 7)
+			| ((value & 0x7e0) << (31 - 11))
+			| ((value & 0x800) >> 4)
+			| ((value & 0x1000) << (31 - 12));
+	}
+	else if ('U' == ch)
+	{
+		if ((value & 0xfff) < 0x800)
+			return value & 0xfffff000;
+		else
+			return (value & 0xfffff000) + 0x1000;
+	}
+	else if ('J' == ch)
+	{
+		if ((value < -0x100000 || value > 0xfffff) || (value & 1))
+			outOfRange(ch, value);
+		return ((value & 0x7fe) << (30 - 10))
+			| ((value & 0x800) << (20 - 11))
+			| ((value & 0xff000))
+			| ((value & 0x100000) << (31 - 20));
+	}
+	else
+	{
+		line_error();
+		fputs("error: encodeField reached impossible case: ch=", stderr);
+		fputc(ch, stderr);
+		fputs("\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+}
+
 void storePointer(char ch, FILE* source_file)
 {
+	char ch2 = 0;
+	if(in_set(ch, ".=")) /* Deal with field for . and ' */
+	{
+		ch2 = fgetc(source_file);
+	}
 	/* Get string of pointer */
 	Clear_Scratch(scratch);
 	Update_Pointer(ch);
@@ -361,6 +447,8 @@ void storePointer(char ch, FILE* source_file)
 	else if('~' == ch) outputPointer(displacement, 3); /* Deal with ~ */
 	else if('&' == ch) outputPointer(target, 4); /* Deal with & */
 	else if('%' == ch) outputPointer(displacement, 4);  /* Deal with % */
+	else if('.' == ch) sr ^= encodeField(ch2, displacement);  /* Deal with . */
+	else if('=' == ch) sr ^= encodeField(ch2, target); /* Deal with = */
 	else
 	{
 		line_error();
@@ -408,6 +496,12 @@ int binary(int c, FILE* source_file)
 	return -1;
 }
 
+unsigned char sr_nextb(void)
+{
+    unsigned char rv = sr & 0xff;
+    sr >>= 8;
+    return rv;
+}
 
 int hold;
 int toggle;
@@ -419,7 +513,7 @@ void process_byte(char c, FILE* source_file, int write)
 		{
 			if(toggle)
 			{
-				if(write) fputc(((hold * 16)) + hex(c, source_file), output);
+				if(write) fputc((((hold * 16)) + hex(c, source_file)) ^ sr_nextb(), output);
 				ip = ip + 1;
 				hold = 0;
 			}
@@ -436,7 +530,7 @@ void process_byte(char c, FILE* source_file, int write)
 		{
 			if(2 == toggle)
 			{
-				if(write) fputc(((hold * 8)) + octal(c, source_file), output);
+				if(write) fputc((((hold * 8)) + octal(c, source_file)) ^ sr_nextb(), output);
 				ip = ip + 1;
 				hold = 0;
 				toggle = 0;
@@ -459,7 +553,7 @@ void process_byte(char c, FILE* source_file, int write)
 		{
 			if(7 == toggle)
 			{
-				if(write) fputc((hold * 2) + binary(c, source_file), output);
+				if(write) fputc(((hold * 2) + binary(c, source_file)) ^ sr_nextb(), output);
 				ip = ip + 1;
 				hold = 0;
 				toggle = 0;
@@ -521,8 +615,12 @@ void first_pass(struct input_files* input)
 		}
 
 		/* check for and deal with relative/absolute pointers to labels */
-		if(in_set(c, "!@$~%&"))
+		if(in_set(c, "!@$~%&.="))
 		{ /* deal with 1byte pointer !; 2byte pointers (@ and $); 3byte pointers ~; 4byte pointers (% and &) */
+			if(in_set(c, ".="))
+			{ /* deal with field for . and ' */
+				fgetc(source_file);
+			}
 			Update_Pointer(c);
 			c = Throwaway_token(source_file);
 			if ('>' == c)
@@ -568,7 +666,7 @@ void second_pass(struct input_files* input)
 	for(c = fgetc(source_file); EOF != c; c = fgetc(source_file))
 	{
 		if(':' == c) c = Throwaway_token(source_file); /* Deal with : */
-		else if(in_set(c, "!@$~%&")) storePointer(c, source_file);  /* Deal with !, @, $, ~, % and & */
+		else if(in_set(c, "!@$~%&.=")) storePointer(c, source_file);  /* Deal with !, @, $, ~, % and & */
 		else if('<' == c) pad_to_align(TRUE);
 		else if('^' == c) ALIGNED = TRUE;
 		else process_byte(c, source_file, TRUE);

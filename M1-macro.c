@@ -486,7 +486,7 @@ void preserve_other(struct blob* p)
 		{
 			c = i->Text[0];
 
-			if(in_set(c, "!@$~%&:^"))
+			if(in_set(c, "!@$~%&:^.="))
 			{
 				i->Expression = i->Text;
 			}
